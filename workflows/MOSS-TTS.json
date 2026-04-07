@@ -1,0 +1,221 @@
+{
+  "id": "995ebabb-dcc4-44fc-852e-a18ea5f33355",
+  "revision": 0,
+  "last_node_id": 16,
+  "last_link_id": 26,
+  "nodes": [
+    {
+      "id": 3,
+      "type": "LoadAudio",
+      "pos": [
+        159.43563907644483,
+        342.34651474499503
+      ],
+      "size": [
+        282.798828125,
+        136
+      ],
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "AUDIO",
+          "type": "AUDIO",
+          "links": [
+            25
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.17.0",
+        "Node name for S&R": "LoadAudio",
+        "ue_properties": {
+          "widget_ue_connectable": {},
+          "input_ue_unconnectable": {},
+          "version": "7.5.2"
+        }
+      },
+      "widgets_values": [
+        "audio (2).wav",
+        null,
+        null
+      ]
+    },
+    {
+      "id": 16,
+      "type": "MossTTSGenerate",
+      "pos": [
+        490.1541245313575,
+        223.48237133318992
+      ],
+      "size": [
+        400,
+        330
+      ],
+      "flags": {},
+      "order": 2,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "model",
+          "type": "MOSS_TTS_MODEL",
+          "link": 24
+        },
+        {
+          "name": "reference_audio",
+          "shape": 7,
+          "type": "AUDIO",
+          "link": 25
+        }
+      ],
+      "outputs": [
+        {
+          "name": "audio",
+          "type": "AUDIO",
+          "links": [
+            26
+          ]
+        }
+      ],
+      "properties": {
+        "ue_properties": {
+          "widget_ue_connectable": {},
+          "input_ue_unconnectable": {}
+        },
+        "Node name for S&R": "MossTTSGenerate"
+      },
+      "widgets_values": [
+        "Hello, this is a test of MOSS TTS.",
+        "clone",
+        "en",
+        1.7,
+        0.8,
+        25,
+        1,
+        4096,
+        ""
+      ]
+    },
+    {
+      "id": 5,
+      "type": "PreviewAudio",
+      "pos": [
+        1044.7629784078044,
+        433.57462465267474
+      ],
+      "size": [
+        270,
+        88
+      ],
+      "flags": {},
+      "order": 3,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "audio",
+          "type": "AUDIO",
+          "link": 26
+        }
+      ],
+      "outputs": [],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.17.0",
+        "Node name for S&R": "PreviewAudio",
+        "ue_properties": {
+          "widget_ue_connectable": {},
+          "input_ue_unconnectable": {},
+          "version": "7.5.2"
+        }
+      },
+      "widgets_values": []
+    },
+    {
+      "id": 15,
+      "type": "MossTTSModelLoader",
+      "pos": [
+        116.9482203635701,
+        121.88743075418148
+      ],
+      "size": [
+        278.662109375,
+        130
+      ],
+      "flags": {},
+      "order": 1,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "model",
+          "type": "MOSS_TTS_MODEL",
+          "links": [
+            24
+          ]
+        }
+      ],
+      "properties": {
+        "ue_properties": {
+          "widget_ue_connectable": {},
+          "input_ue_unconnectable": {}
+        },
+        "Node name for S&R": "MossTTSModelLoader"
+      },
+      "widgets_values": [
+        "MossTTSDelay (8B)",
+        "auto",
+        "bfloat16",
+        "sdpa"
+      ]
+    }
+  ],
+  "links": [
+    [
+      24,
+      15,
+      0,
+      16,
+      0,
+      "MOSS_TTS_MODEL"
+    ],
+    [
+      25,
+      3,
+      0,
+      16,
+      1,
+      "AUDIO"
+    ],
+    [
+      26,
+      16,
+      0,
+      5,
+      0,
+      "AUDIO"
+    ]
+  ],
+  "groups": [],
+  "config": {},
+  "extra": {
+    "workflowRendererVersion": "LG",
+    "ue_links": [],
+    "links_added_by_ue": [],
+    "ds": {
+      "scale": 0.9646149645000006,
+      "offset": [
+        262.42170671251847,
+        114.01161283514199
+      ]
+    },
+    "frontendVersion": "1.39.16",
+    "VHS_latentpreview": false,
+    "VHS_latentpreviewrate": 0,
+    "VHS_MetadataImage": true,
+    "VHS_KeepIntermediate": true
+  },
+  "version": 0.4
+}
