@@ -16,7 +16,6 @@ _DTYPE_MAP = {
 }
 
 _AUDIO_TOKENIZER_REPO = "OpenMOSS-Team/MOSS-Audio-Tokenizer"
-_io_replaced = False
 
 
 def _sanitize(name: str) -> str:
@@ -24,13 +23,21 @@ def _sanitize(name: str) -> str:
 
 
 def _download(repo_id: str, local_dir: str):
+    import inspect
     from huggingface_hub import snapshot_download
-    snapshot_download(
+    kwargs = dict(
         repo_id=repo_id,
         local_dir=local_dir,
-        local_dir_use_symlinks=False,
-        ignore_patterns=["*.msgpack", "*.h5", "flax_model*", "tf_model*"],
+        ignore_patterns=[
+            "*.msgpack", "*.h5", "flax_model*", "tf_model*",
+            "images/*", "*.png", "*.jpg",
+        ],
     )
+    # `local_dir_use_symlinks` was deprecated in huggingface_hub 0.23 and
+    # removed in 1.0 (local_dir downloads are always real files now).
+    if "local_dir_use_symlinks" in inspect.signature(snapshot_download).parameters:
+        kwargs["local_dir_use_symlinks"] = False
+    snapshot_download(**kwargs)
 
 
 def _fix_audio_tokenizer_config(tokenizer_dir: str):
@@ -73,33 +80,123 @@ def _fix_audio_tokenizer_config(tokenizer_dir: str):
         print("[MOSS-TTS] Fixed configuration_moss_audio_tokenizer.py")
 
 
-def _replace_torchaudio_io():
+def _load_processor(model_dir: str, tokenizer_dir: str):
     """
-    MOSS-TTS calls torchaudio.load() and torchaudio.functional.resample().
-    Replace with soundfile + scipy since TorchCodec is unavailable.
+    Build the MOSS-TTS processor from its parts instead of AutoProcessor.
+
+    Newer transformers (5.x) forward hub kwargs such as `revision` through
+    AutoProcessor into the remote MossTTSDelayProcessor.from_pretrained, which
+    passes them on to ProcessorMixin.__init__ -> "Unexpected keyword argument
+    revision". Constructing it directly sidesteps that and keeps the audio
+    tokenizer pointed at our local copy.
     """
-    import soundfile as sf
-    import numpy as np
-    from scipy.signal import resample_poly
+    import json
+    from transformers import AutoConfig, AutoModel, AutoTokenizer
+    from transformers.dynamic_module_utils import get_class_from_dynamic_module
+
+    class_ref = "processing_moss_tts.MossTTSDelayProcessor"
+    cfg_path = os.path.join(model_dir, "processor_config.json")
+    if os.path.exists(cfg_path):
+        with open(cfg_path, "r", encoding="utf-8") as f:
+            class_ref = json.load(f).get("auto_map", {}).get("AutoProcessor", class_ref)
+
+    processor_cls = get_class_from_dynamic_module(class_ref, model_dir)
+    model_config = AutoConfig.from_pretrained(model_dir, trust_remote_code=True)
+    tokenizer = AutoTokenizer.from_pretrained(model_dir, trust_remote_code=True)
+    audio_tokenizer = AutoModel.from_pretrained(tokenizer_dir, trust_remote_code=True)
+    audio_tokenizer.eval()
+    return processor_cls(
+        tokenizer=tokenizer,
+        audio_tokenizer=audio_tokenizer,
+        model_config=model_config,
+    )
+
+
+def _patch_create_causal_mask(model):
+    """
+    MossTTSLocal's remote code calls
+        create_causal_mask(input_embeds=..., cache_position=..., ...)
+    but transformers renamed `input_embeds` -> `inputs_embeds` and dropped
+    `cache_position`. Wrap the function in the remote module's namespace so the
+    call adapts to whatever signature the installed transformers has.
+    (The local transformer ignores the mask anyway: it uses is_causal=True.)
+    """
+    import sys
+    import inspect
+
+    mod = sys.modules.get(type(model).__module__)
+    fn = getattr(mod, "create_causal_mask", None) if mod is not None else None
+    if fn is None or getattr(fn, "_moss_tts_compat", False):
+        return
+
+    params = inspect.signature(fn).parameters
+    has_var_kw = any(p.kind == p.VAR_KEYWORD for p in params.values())
+
+    def create_causal_mask(*args, **kwargs):
+        if "input_embeds" in kwargs and "input_embeds" not in params:
+            kwargs.setdefault("inputs_embeds", kwargs.pop("input_embeds"))
+        if not has_var_kw:
+            kwargs = {k: v for k, v in kwargs.items() if k in params}
+        return fn(*args, **kwargs)
+
+    create_causal_mask._moss_tts_compat = True
+    mod.create_causal_mask = create_causal_mask
+
+
+def _ensure_torchaudio():
+    """
+    The MOSS-TTS remote code does `import torchaudio` at module level, but the
+    node itself never routes audio through torchaudio (reference audio is
+    resampled and encoded in tts_generate.py). Recent ComfyUI no longer ships
+    torchaudio, and torchaudio wheels that don't match the installed torch fail
+    to import. In either case, register a minimal soundfile/scipy-backed
+    stand-in so the remote code can import. A working torchaudio is left
+    untouched (no global monkey-patching).
+    """
+    import sys
+
+    try:
+        import torchaudio  # noqa: F401
+        import torchaudio.functional  # noqa: F401
+        return
+    except Exception as e:  # ImportError, OSError (ABI mismatch), RuntimeError
+        print(f"[MOSS-TTS] torchaudio unavailable ({type(e).__name__}: {e}); using built-in fallback.")
+
+    import types
     from math import gcd
 
     def _load(filepath, *args, **kwargs):
+        import soundfile as sf
         # soundfile returns [T, C]; torchaudio returns [C, T]
         data, sr = sf.read(str(filepath), dtype="float32", always_2d=True)
         return torch.from_numpy(data.T.copy()), sr
 
     def _resample(waveform, orig_freq, new_freq, *args, **kwargs):
+        import numpy as np
+        from scipy.signal import resample_poly
         orig_freq, new_freq = int(orig_freq), int(new_freq)
         if orig_freq == new_freq:
             return waveform
         g = gcd(orig_freq, new_freq)
-        out = resample_poly(waveform.numpy(), new_freq // g, orig_freq // g, axis=-1)
-        return torch.from_numpy(out.astype(np.float32))
+        src = waveform.detach().float().cpu().numpy()
+        out = resample_poly(src, new_freq // g, orig_freq // g, axis=-1)
+        return torch.from_numpy(np.ascontiguousarray(out, dtype=np.float32)).to(waveform.device)
 
-    import torchaudio
-    import torchaudio.functional as F
-    torchaudio.load = _load
-    F.resample = _resample
+    from importlib.machinery import ModuleSpec
+
+    functional = types.ModuleType("torchaudio.functional")
+    functional.__spec__ = ModuleSpec("torchaudio.functional", None)
+    functional.resample = _resample
+    stub = types.ModuleType("torchaudio")
+    # transformers probes packages with importlib.util.find_spec(), which
+    # raises on a module whose __spec__ is None.
+    stub.__spec__ = ModuleSpec("torchaudio", None, is_package=True)
+    stub.__path__ = []
+    stub.__version__ = "0.0.0+moss_tts_stub"
+    stub.load = _load
+    stub.functional = functional
+    sys.modules["torchaudio"] = stub
+    sys.modules["torchaudio.functional"] = functional
 
 
 class MossTTSModelLoader:
@@ -137,13 +234,10 @@ class MossTTSModelLoader:
         return hashlib.md5(key.encode()).hexdigest()
 
     def load_model(self, model_type, device, dtype, attn_implementation):
-        global _io_replaced
         import folder_paths
-        from transformers import AutoModel, AutoProcessor
+        from transformers import AutoModel
 
-        if not _io_replaced:
-            _replace_torchaudio_io()
-            _io_replaced = True
+        _ensure_torchaudio()
 
         resolved_device = ("cuda" if torch.cuda.is_available() else "cpu") if device == "auto" else device
         resolved_dtype = _DTYPE_MAP[dtype]
@@ -217,11 +311,7 @@ class MossTTSModelLoader:
                 torch.backends.cuda.enable_cudnn_sdp(False)
 
             print("[MOSS-TTS] Loading processor ...")
-            processor = AutoProcessor.from_pretrained(
-                local_dir,
-                trust_remote_code=True,
-                codec_path=tokenizer_dir,   # use local copy, not HuggingFace
-            )
+            processor = _load_processor(local_dir, tokenizer_dir)
             if hasattr(processor, "audio_tokenizer"):
                 # audio_tokenizer is separate from the main model so device_map
                 # doesn't cover it — place it explicitly.
@@ -240,10 +330,11 @@ class MossTTSModelLoader:
                 local_dir,
                 trust_remote_code=True,
                 attn_implementation=attn_implementation,
-                torch_dtype=resolved_dtype,
+                dtype=resolved_dtype,  # `torch_dtype` is deprecated in transformers 5
                 device_map=load_device_map,
             )
             model.eval()
+            _patch_create_causal_mask(model)
 
             # transformers 5.x DynamicCache needs config.num_hidden_layers directly.
             # MossTTSDelayConfig stores it inside language_config (Qwen3Config).

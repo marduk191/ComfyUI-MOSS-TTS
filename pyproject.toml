@@ -1,0 +1,30 @@
+[project]
+name = "comfyui-moss-tts"
+version = "1.1.0"
+description = "ComfyUI nodes for MOSS-TTS (OpenMOSS): multilingual text-to-speech with zero-shot voice cloning and continuation. 8B and 1.7B models download automatically on first use."
+authors = [{name = "marduk191"}]
+license = {text = "Apache-2.0"}
+requires-python = ">=3.10"
+readme = "README.md"
+# torch is provided by ComfyUI and must match the user's CUDA build, so it is not listed.
+dependencies = [
+    "transformers>=5.0.0",
+    "huggingface_hub>=0.27.0",
+    "accelerate>=0.30.0",
+    "soundfile>=0.12.0",
+    "scipy>=1.10.0",
+    "numpy>=1.24.0",
+]
+classifiers = [
+    "Operating System :: OS Independent",
+]
+
+[project.urls]
+Repository = "https://github.com/marduk191/ComfyUI-MOSS-TTS"
+Issues = "https://github.com/marduk191/ComfyUI-MOSS-TTS/issues"
+
+[tool.comfy]
+PublisherId = "marduk191"
+DisplayName = "MOSS-TTS"
+Icon = ""
+includes = []
