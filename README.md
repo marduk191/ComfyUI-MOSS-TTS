@@ -28,10 +28,15 @@ pip install -r requirements.txt
 
 Restart ComfyUI. Models will download automatically when the loader node first runs.
 
+Also available from the [Comfy Registry](https://registry.comfy.org/nodes/comfyui-moss-tts):
+
+```bash
+comfy node install comfyui-moss-tts
+```
+
 ### Flash Attention 2 (optional)
 
-Not Currently implemented.
-```
+Not currently implemented — selecting `flash_attention_2` falls back to `sdpa` when `flash-attn` is not installed.
 
 ---
 
@@ -68,6 +73,7 @@ Generates speech from text. Supports four generation modes.
 | max_new_tokens | 4096 | Maximum audio tokens to generate |
 | reference_audio | — | (optional) Reference audio for cloning/continuation |
 | reference_text | — | (optional) Transcript of reference audio |
+| seed | 0 | (optional) Sampling seed. Same seed + settings = same output; change it for a new take |
 
 **Output:** `AUDIO` — compatible with all standard ComfyUI audio nodes (Preview Audio, Save Audio, etc).
 
@@ -103,4 +109,9 @@ Generates speech from text. Supports four generation modes.
 
 - Only one model is kept in VRAM at a time. Switching models in the loader node automatically frees the previous one.
 - The 8B model uses `device_map="auto"` which will offload layers to system RAM if VRAM is insufficient.
-- `torchaudio` is not required — audio I/O uses `soundfile` and `scipy`.
+- `torchaudio` is not required — reference audio is resampled with `scipy` and encoded directly; if `torchaudio` is missing or broken, a small built-in fallback is used so the model code can still import.
+- Reference audio of any sample rate / channel count is accepted; it is downmixed to mono and resampled to the model rate (24 kHz).
+
+## Compatibility
+
+Tested on CPU with ComfyUI 0.43.0 (master, 2026-10-31), PyTorch 2.15, transformers 5.22.1, huggingface_hub 2.4.0, Python 3.13, using the `MossTTSLocal (1.7B)` model in all four modes.

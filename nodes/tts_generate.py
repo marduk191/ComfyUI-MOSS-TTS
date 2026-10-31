@@ -1,8 +1,7 @@
-import os
-import tempfile
-import torch
+from math import gcd
+
 import numpy as np
-import soundfile as sf
+import torch
 
 _LANGUAGES = [
     "auto", "en", "zh", "de", "es", "fr", "ja", "ko", "pt", "it",
@@ -12,12 +11,34 @@ _LANGUAGES = [
 _MODES = ["default", "clone", "continuation", "continuation_clone"]
 
 
-def _save_wav(path, waveform_2d, sample_rate):
-    """Save a [C, T] float32 tensor as a WAV file using soundfile."""
-    data = waveform_2d.detach().float().numpy()
-    if data.ndim == 2:
-        data = data.T  # [C, T] -> [T, C]
-    sf.write(path, data, sample_rate)
+def _to_mono_resampled(waveform, orig_sr, target_sr):
+    """
+    ComfyUI AUDIO waveform [C, T] -> mono float32 [1, T] at target_sr.
+    Resampling uses scipy so we never depend on torchaudio's I/O backends
+    (torchaudio >= 2.9 needs TorchCodec for load/save).
+    """
+    wav = waveform.detach().float().cpu()
+    if wav.dim() == 1:
+        wav = wav.unsqueeze(0)
+    if wav.shape[0] > 1:
+        wav = wav.mean(dim=0, keepdim=True)
+    orig_sr, target_sr = int(orig_sr), int(target_sr)
+    if orig_sr != target_sr:
+        from scipy.signal import resample_poly
+        g = gcd(orig_sr, target_sr)
+        out = resample_poly(wav.numpy(), target_sr // g, orig_sr // g, axis=-1)
+        wav = torch.from_numpy(np.ascontiguousarray(out, dtype=np.float32))
+    return wav
+
+
+def _encode_reference(processor, reference_audio, sample_rate):
+    """Encode a ComfyUI AUDIO dict into MOSS audio codes [T, NQ]."""
+    waveform = reference_audio["waveform"][0]  # [B, C, T] -> [C, T]
+    wav = _to_mono_resampled(waveform, reference_audio["sample_rate"], sample_rate)
+    if wav.shape[-1] == 0:
+        raise ValueError("[MOSS-TTS] reference_audio is empty.")
+    with torch.inference_mode():
+        return processor.encode_audios_from_wav([wav], sample_rate)[0]
 
 
 class MossTTSGenerate:
@@ -64,6 +85,13 @@ class MossTTSGenerate:
                     "default": "",
                     "dynamicPrompts": False,
                 }),
+                # Kept last (and optional) so widget order in existing saved
+                # workflows is unchanged.
+                "seed": ("INT", {
+                    "default": 0, "min": 0, "max": 0xFFFFFFFFFFFFFFFF,
+                    "control_after_generate": True,
+                    "tooltip": "Random seed for sampling. Change it (or set to randomize) to get a different take.",
+                }),
             },
         }
 
@@ -85,6 +113,7 @@ class MossTTSGenerate:
         max_new_tokens,
         reference_audio=None,
         reference_text="",
+        seed=0,
     ):
         processor   = model["processor"]
         hf_model    = model["model"]
@@ -105,17 +134,13 @@ class MossTTSGenerate:
                 "of the reference audio). Fill in the reference_text field."
             )
 
-        _tmp = None
-        ref_audio_path = None
+        ref_codes = None
 
         try:
-            if reference_audio is not None:
-                _tmp = tempfile.TemporaryDirectory(prefix="moss_tts_ref_")
-                ref_audio_path = os.path.join(_tmp.name, "reference.wav")
-                # ComfyUI waveform: [B, C, T] float32
-                waveform = reference_audio["waveform"][0]  # [C, T]
-                ref_sr   = reference_audio["sample_rate"]
-                _save_wav(ref_audio_path, waveform, ref_sr)
+            # Only encode the reference when the selected mode actually uses it.
+            if needs_reference:
+                print("[MOSS-TTS] Encoding reference audio ...")
+                ref_codes = _encode_reference(processor, reference_audio, sample_rate)
 
             lang_kwargs = {} if language == "auto" else {"language": language}
 
@@ -129,7 +154,7 @@ class MossTTSGenerate:
                 conversations = [[
                     processor.build_user_message(
                         text=text,
-                        reference=[ref_audio_path],
+                        reference=[ref_codes],
                         **lang_kwargs,
                     )
                 ]]
@@ -139,7 +164,7 @@ class MossTTSGenerate:
                 combined = reference_text.strip() + " " + text.strip()
                 conversations = [[
                     processor.build_user_message(text=combined, **lang_kwargs),
-                    processor.build_assistant_message(audio_codes_list=[ref_audio_path]),
+                    processor.build_assistant_message(audio_codes_list=[ref_codes]),
                 ]]
                 proc_mode = "continuation"
 
@@ -148,10 +173,10 @@ class MossTTSGenerate:
                 conversations = [[
                     processor.build_user_message(
                         text=combined,
-                        reference=[ref_audio_path],
+                        reference=[ref_codes],
                         **lang_kwargs,
                     ),
-                    processor.build_assistant_message(audio_codes_list=[ref_audio_path]),
+                    processor.build_assistant_message(audio_codes_list=[ref_codes]),
                 ]]
                 proc_mode = "continuation"
 
@@ -161,7 +186,8 @@ class MossTTSGenerate:
             input_ids      = batch["input_ids"].to(device)
             attention_mask = batch["attention_mask"].to(device)
 
-            print(f"[MOSS-TTS] Generating audio (max_new_tokens={max_new_tokens}) ...")
+            print(f"[MOSS-TTS] Generating audio (max_new_tokens={max_new_tokens}, seed={seed}) ...")
+            torch.manual_seed(seed & 0xFFFFFFFFFFFFFFFF)
             with torch.inference_mode():
                 outputs = hf_model.generate(
                     input_ids=input_ids,
@@ -176,8 +202,11 @@ class MossTTSGenerate:
             print("[MOSS-TTS] Decoding audio ...")
             decoded = processor.decode(outputs)
 
-            if not decoded or not decoded[0].audio_codes_list:
-                raise RuntimeError("[MOSS-TTS] Generation produced no audio output.")
+            if not decoded or decoded[0] is None or not decoded[0].audio_codes_list:
+                raise RuntimeError(
+                    "[MOSS-TTS] Generation produced no audio output. "
+                    "Try increasing max_new_tokens or changing the seed/sampling settings."
+                )
 
             audio_tensor = decoded[0].audio_codes_list[0]
 
@@ -192,10 +221,3 @@ class MossTTSGenerate:
 
         except Exception as e:
             raise RuntimeError(f"[MOSS-TTS] Generation failed: {e}") from e
-
-        finally:
-            if _tmp is not None:
-                try:
-                    _tmp.cleanup()
-                except Exception:
-                    pass
